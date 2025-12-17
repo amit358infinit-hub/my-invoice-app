@@ -1,25 +1,19 @@
 import streamlit as st
 import os
-import json
-import csv
-from datetime import datetime
 import inflect
 from docxtpl import DocxTemplate
+from docxcompose.composer import Composer
+from docx import Document as Document_compose
 from io import BytesIO
 
 # ================= Configuration =================
 TEMPLATE_FILE = "invoice.docx"
-HISTORY_FILE = "invoice_history.csv"
-STATE_FILE = "app_state.json"
-
 RATE = 820.00
 SGST_RATE = 0.09
 CGST_RATE = 0.09
 
 # ================= Helper Functions =================
-
 def indian_format(n):
-    """Numbers को 12,34,567.89 फॉर्मेट में बदलता है"""
     s, *d = str(f"{n:.2f}").partition(".")
     if len(s) > 3:
         s = s[:-3] + "," + s[-3:]
@@ -35,106 +29,55 @@ def number_to_words(n):
     return f"Rupees {words} Only"
 
 def get_next_invoice_no(current_inv):
-    if not current_inv:
-        return "SBT/2526/1"
+    if not current_inv: return "SBT/2526/1"
     try:
         parts = current_inv.rsplit('/', 1)
         if len(parts) == 2 and parts[1].isdigit():
             return f"{parts[0]}/{int(parts[1]) + 1}"
-    except:
-        pass
+    except: pass
     return current_inv
 
-def load_state():
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE, 'r') as f:
-                return json.load(f)
-        except:
-            return {}
-    return {}
+# ================= Session State Init =================
+# यह लिस्ट "Add" किए गए इनवॉइस को याद रखेगी
+if 'invoice_queue' not in st.session_state:
+    st.session_state.invoice_queue = []
 
-def save_state(last_inv):
-    with open(STATE_FILE, 'w') as f:
-        json.dump({"last_invoice": last_inv}, f)
+if 'last_inv_no' not in st.session_state:
+    st.session_state.last_inv_no = "SBT/2526/1"
 
-def save_to_history(data_dict):
-    file_exists = os.path.isfile(HISTORY_FILE)
-    with open(HISTORY_FILE, 'a', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        if not file_exists:
-            writer.writerow(["Date", "Invoice No", "Truck No", "Qty", "Amount", "Grand Total"])
-        writer.writerow([
-            data_dict['date'], 
-            data_dict['invoice_no'], 
-            data_dict['truck_no'], 
-            data_dict['qty'], 
-            data_dict['amount'], 
-            data_dict['rounded']
-        ])
-
-# ================= Streamlit UI Layout =================
-
-st.set_page_config(page_title="Invoice Generator", page_icon="🧾")
-
-st.title("🧾 GST Invoice Generator")
+# ================= UI Layout =================
+st.set_page_config(page_title="Multi-Invoice Generator", page_icon="📑")
+st.title("📑 Multi-Invoice Generator")
 st.markdown("### Laxmistuti Enterprises")
-
-# --- Sidebar for Status ---
-with st.sidebar:
-    st.header("Settings & History")
-    if os.path.exists(HISTORY_FILE):
-        with open(HISTORY_FILE, "rb") as f:
-            st.download_button("Download History CSV", f, file_name="invoice_history.csv")
-    else:
-        st.write("No history yet.")
-
-# --- Load Last Invoice Number ---
-saved_state = load_state()
-last_inv = saved_state.get("last_invoice", "SBT/2526/0")
-next_inv_suggestion = get_next_invoice_no(last_inv)
 
 # --- Form Inputs ---
 col1, col2 = st.columns(2)
-
 with col1:
-    inv_no = st.text_input("Invoice No:", value=next_inv_suggestion)
+    # अगर पिछले इनवॉइस से अगला नंबर है तो वो दिखाएं
+    inv_no = st.text_input("Invoice No:", value=st.session_state.last_inv_no)
     truck_no = st.text_input("Truck No:", placeholder="MP09GH1234").upper()
-
 with col2:
-    date_val = st.text_input("Date:", value=datetime.today().strftime("%d/%m/%Y"))
+    date_val = st.text_input("Date:", value="11/12/2025") # Default date
     qty_val = st.number_input("Quantity (M.T.):", min_value=0.0, format="%.2f", step=0.1)
 
-# --- Live Calculation & Preview ---
-st.markdown("---")
-st.subheader("Calculation Preview")
+# --- Calculation ---
+amt = qty_val * RATE
+sgst = amt * SGST_RATE
+cgst = amt * CGST_RATE
+gtotal = amt + sgst + cgst
+rounded = round(gtotal)
 
 if qty_val > 0:
-    amt = qty_val * RATE
-    sgst = amt * SGST_RATE
-    cgst = amt * CGST_RATE
-    gtotal = amt + sgst + cgst
-    rounded = round(gtotal)
-    
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Basic Amount", f"₹ {indian_format(amt)}")
-    c2.metric("GST (18%)", f"₹ {indian_format(sgst + cgst)}")
-    c3.metric("Grand Total", f"₹ {indian_format(rounded)}")
-else:
-    st.info("Enter quantity to see calculation.")
+    st.info(f"Amount: {indian_format(rounded)} | Words: {number_to_words(rounded)}")
 
-# --- Generate Button ---
-if st.button("Generate Invoice", type="primary"):
+# ================= ACTION BUTTONS =================
+
+# 1. ADD TO LIST BUTTON
+if st.button("➕ Add Invoice to List", type="primary"):
     if not inv_no or not truck_no or qty_val <= 0:
-        st.error("कृपया सभी डीटेल्स भरें और Quantity 0 से ज्यादा रखें।")
+        st.error("Please fill all details correctly.")
     else:
-        # Data Preparation
-        amt = qty_val * RATE
-        sgst = amt * SGST_RATE
-        cgst = amt * CGST_RATE
-        gtotal = amt + sgst + cgst
-        rounded = round(gtotal)
-
+        # Context create karein
         context = {
             'invoice_no': inv_no,
             'date': date_val,
@@ -147,36 +90,91 @@ if st.button("Generate Invoice", type="primary"):
             'rounded': indian_format(rounded),
             'amount_words': number_to_words(rounded)
         }
+        
+        # Queue me add karein
+        st.session_state.invoice_queue.append(context)
+        st.success(f"✅ Invoice {inv_no} added! (Total in list: {len(st.session_state.invoice_queue)})")
+        
+        # Agla invoice number set karein
+        next_no = get_next_invoice_no(inv_no)
+        st.session_state.last_inv_no = next_no
+        st.rerun() # Page refresh taaki naya number dikhe
 
-        # Template Handling
-        if not os.path.exists(TEMPLATE_FILE):
-            st.error(f"Template '{TEMPLATE_FILE}' नहीं मिला! कृपया इसे उसी फोल्डर में रखें।")
-        else:
-            try:
-                doc = DocxTemplate(TEMPLATE_FILE)
-                doc.render(context)
+st.markdown("---")
 
-                # Save to Memory buffer instead of disk directly
-                io_stream = BytesIO()
-                doc.save(io_stream)
-                io_stream.seek(0)
-                
-                # Save History & State
-                save_to_history(context)
-                save_state(inv_no)
-                
-                st.success(f"Invoice {inv_no} Generated Successfully!")
-                
-                # Download Button
-                file_name = f"Invoice_{inv_no.replace('/', '_')}.docx"
-                st.download_button(
-                    label="📥 Download Invoice File",
-                    data=io_stream,
-                    file_name=file_name,
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                )
-                
-                st.info("अगले इनवॉइस के लिए पेज रिफ्रेश करें या नया नंबर डालें।")
+# ================= QUEUE DISPLAY & DOWNLOAD =================
 
-            except Exception as e:
-                st.error(f"Error: {e}")
+if len(st.session_state.invoice_queue) > 0:
+    st.subheader(f"📋 Invoices Ready to Print ({len(st.session_state.invoice_queue)})")
+    
+    # List dikhayein
+    for i, item in enumerate(st.session_state.invoice_queue):
+        st.text(f"{i+1}. Inv: {item['invoice_no']} | Truck: {item['truck_no']} | Amt: {item['rounded']}")
+
+    col_d1, col_d2 = st.columns([1, 1])
+
+    # 2. GENERATE COMBINED FILE
+    with col_d1:
+        if st.button("📥 Generate Combined Word File"):
+            if not os.path.exists(TEMPLATE_FILE):
+                st.error("Template file not found!")
+            else:
+                try:
+                    # Master Composer setup
+                    master_doc = None
+                    composer = None
+
+                    # Har saved context ke liye loop chalayein
+                    for idx, ctx in enumerate(st.session_state.invoice_queue):
+                        doc = DocxTemplate(TEMPLATE_FILE)
+                        doc.render(ctx)
+
+                        if idx == 0:
+                            # Pehla invoice master banega
+                            # Hame ise memory me save karke wapas load karna padega
+                            # taaki wo 'Document' object ban jaye 'DocxTemplate' se
+                            temp_io = BytesIO()
+                            doc.save(temp_io)
+                            temp_io.seek(0)
+                            master_doc = Document_compose(temp_io)
+                            composer = Composer(master_doc)
+                        else:
+                            # Agle invoices append honge
+                            master_doc.add_page_break() # Naya page
+                            
+                            temp_io = BytesIO()
+                            doc.save(temp_io)
+                            temp_io.seek(0)
+                            sub_doc = Document_compose(temp_io)
+                            composer.append(sub_doc)
+
+                    # Final save to memory
+                    final_io = BytesIO()
+                    composer.save(final_io)
+                    final_io.seek(0)
+
+                    st.session_state['final_file'] = final_io
+                    st.success("File Created! Click Download below.")
+
+                except Exception as e:
+                    st.error(f"Error: {e}")
+
+    # 3. DOWNLOAD BUTTON (Generate hone ke baad dikhega)
+    if 'final_file' in st.session_state:
+        st.download_button(
+            label="⬇️ Download All Invoices (DOCX)",
+            data=st.session_state['final_file'],
+            file_name="Combined_Invoices.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        )
+
+    # 4. CLEAR LIST
+    with col_d2:
+        if st.button("🗑️ Clear List"):
+            st.session_state.invoice_queue = []
+            if 'final_file' in st.session_state:
+                del st.session_state['final_file']
+            st.rerun()
+
+else:
+    st.info("👆 ऊपर डिटेल्स भरकर 'Add Invoice' बटन दबाएं। लिस्ट यहाँ दिखेगी।")
